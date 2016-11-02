@@ -15,3 +15,7 @@
 /lab?/
 /sol?/
 /myapi.key
+/**/*~
+/*~
+/.cproject
+/.project
