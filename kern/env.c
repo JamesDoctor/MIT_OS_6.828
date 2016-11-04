@@ -116,9 +116,19 @@ env_init(void)
 {
 	// Set up envs array
 	// LAB 3: Your code here.
+	struct Env* current;
+	env_free_list = current = envs;
+	int i = 1;
+	for (; i < NENV; ++i) {
+		current->env_link = envs+i;
+		envs[i].env_id = 0;
+		envs[i].env_link = 0;
+		current = envs+i;
+	}
 
 	// Per-CPU part of the initialization
 	env_init_percpu();
+	cprintf("env_init: succeeded.\n");
 }
 
 // Load GDT and segment descriptors.
@@ -179,6 +189,10 @@ env_setup_vm(struct Env *e)
 	//    - The functions in kern/pmap.h are handy.
 
 	// LAB 3: Your code here.
+	++(p->pp_ref);
+	e->env_pgdir = page2kva(p);
+
+	memmove((void *) e->env_pgdir, (void *) kern_pgdir, PGSIZE);
 
 	// UVPT maps the env's own page table read-only.
 	// Permissions: kernel R, user R
@@ -198,6 +212,7 @@ env_setup_vm(struct Env *e)
 int
 env_alloc(struct Env **newenv_store, envid_t parent_id)
 {
+	cprintf("env_alloc: started.\n");
 	int32_t generation;
 	int r;
 	struct Env *e;
@@ -267,6 +282,42 @@ region_alloc(struct Env *e, void *va, size_t len)
 	//   'va' and 'len' values that are not page-aligned.
 	//   You should round va down, and round (va + len) up.
 	//   (Watch out for corner-cases!)
+    uint32_t start = ROUNDDOWN((uint32_t)va, PGSIZE);
+    uint32_t end = ROUNDUP((uint32_t)(va+len), PGSIZE);
+    while (start < end) {
+    	struct PageInfo* p = page_alloc(0);
+		page_insert(e->env_pgdir, p, (void*)start, PTE_U|PTE_W);
+    	start += PGSIZE;
+    }
+}
+
+static void copyToSeg(pde_t* pgdir, uint32_t va, uint8_t* src, uint32_t size) {
+	if (size == 0) return;
+	uint32_t n = size/PGSIZE;
+	uint32_t left = size - n*PGSIZE;
+	int i = 0;
+	for (; i < n; ++i, va += PGSIZE, src += src ? PGSIZE : 0) {
+		struct PageInfo* p = page_lookup(pgdir, (void*)va, NULL);
+		if (p) {
+			void* addr = page2kva(p);
+			if (src)
+				memcpy(addr, src, PGSIZE);
+			else
+				memset(addr, 0, PGSIZE);
+		}
+	}
+
+	if (!left)
+		return;
+
+	struct PageInfo* p = page_lookup(pgdir, (void*)va, NULL);
+	if (p) {
+		void* addr = page2kva(p);
+		if (src)
+			memcpy(addr, src, left);
+		else
+			memset(addr, 0, left);
+	}
 }
 
 //
@@ -294,6 +345,7 @@ region_alloc(struct Env *e, void *va, size_t len)
 static void
 load_icode(struct Env *e, uint8_t *binary)
 {
+	cprintf("load_icode: started.\n");
 	// Hints:
 	//  Load each program segment into virtual memory
 	//  at the address specified in the ELF section header.
@@ -323,11 +375,36 @@ load_icode(struct Env *e, uint8_t *binary)
 	//  What?  (See env_run() and env_pop_tf() below.)
 
 	// LAB 3: Your code here.
+	struct Elf* elf = (struct Elf*)binary;
+	if (elf->e_magic != ELF_MAGIC)
+		return;
+
+	e->env_tf.tf_eip = (uintptr_t)(elf->e_entry);
+
+//	//Load the use mode's page directory address.
+//	lcr3 (PADDR(e->env_pgdir));
+
+	// load each program segment (ignores ph flags)
+	struct Proghdr * ph = (struct Proghdr *) ((uint8_t *) elf + elf->e_phoff);
+	struct Proghdr * eph = ph + elf->e_phnum;
+	for (; ph < eph; ph++) {
+		if (ph->p_type == ELF_PROG_LOAD) {
+			region_alloc(e, (void*)(ph->p_va), ph->p_memsz);
+			copyToSeg(e->env_pgdir, ph->p_va, binary+ph->p_offset, ph->p_filesz);
+			copyToSeg(e->env_pgdir, ph->p_va + ph->p_filesz, NULL, ph->p_memsz-ph->p_filesz);
+//			memset ((void *)ph->p_va, 0, ph->p_memsz);
+//			memmove ((void *)ph->p_va, binary + ph->p_offset, ph->p_filesz);
+		}
+	}
+//	//Reset the kernel pte since we've already finished the operation in user space.
+//	lcr3 (PADDR(kern_pgdir));
 
 	// Now map one page for the program's initial stack
 	// at virtual address USTACKTOP - PGSIZE.
 
 	// LAB 3: Your code here.
+	region_alloc(e, (void*)(USTACKTOP-PGSIZE), PGSIZE);
+	cprintf("load_icode: finished.\n");
 }
 
 //
@@ -341,6 +418,15 @@ void
 env_create(uint8_t *binary, enum EnvType type)
 {
 	// LAB 3: Your code here.
+	struct Env *env;
+	int result = env_alloc(&env, 0);
+	if (result) {
+		panic("env_alloc: %d - %e", result, result);
+		return;
+	}
+	env->env_type = type;
+	load_icode(env, binary);
+	cprintf("env_create: finished.\n");
 }
 
 //
@@ -456,7 +542,24 @@ env_run(struct Env *e)
 	//	e->env_tf to sensible values.
 
 	// LAB 3: Your code here.
+	cprintf("env_run: begins.\n");
 
-	panic("env_run not yet implemented");
+	assert(e && (e != curenv));
+	// Step 1.
+	if (curenv) {
+		if (curenv->env_status == ENV_RUNNING)
+			curenv->env_status = ENV_RUNNABLE;
+	}
+	curenv = e;
+	curenv->env_status = ENV_RUNNING;
+	++curenv->env_runs;
+	cprintf("env_run: initialization finished. About to call lcr3\n");
+	lcr3(PADDR(curenv->env_pgdir));
+
+	// Step 2.
+	cprintf("env_run: lcr3 finished. About to call env_pop_tf\n");
+	env_pop_tf(&(curenv->env_tf));
+
+	cprintf("env_run: finished.\n");
 }
 
