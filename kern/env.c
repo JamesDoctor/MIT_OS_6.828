@@ -299,7 +299,7 @@ static void copyToSeg(pde_t* pgdir, uint32_t va, uint8_t* src, uint32_t size) {
 	for (; i < n; ++i, va += PGSIZE, src += src ? PGSIZE : 0) {
 		struct PageInfo* p = page_lookup(pgdir, (void*)va, NULL);
 		if (p) {
-			void* addr = page2kva(p);
+			void* addr = page2kva(p) + va%PGSIZE;
 			if (src)
 				memcpy(addr, src, PGSIZE);
 			else
@@ -312,7 +312,7 @@ static void copyToSeg(pde_t* pgdir, uint32_t va, uint8_t* src, uint32_t size) {
 
 	struct PageInfo* p = page_lookup(pgdir, (void*)va, NULL);
 	if (p) {
-		void* addr = page2kva(p);
+		void* addr = page2kva(p) + va%PGSIZE;
 		if (src)
 			memcpy(addr, src, left);
 		else
@@ -381,8 +381,8 @@ load_icode(struct Env *e, uint8_t *binary)
 
 	e->env_tf.tf_eip = (uintptr_t)(elf->e_entry);
 
-	//Load the use mode's page directory address.
-	lcr3 (PADDR(e->env_pgdir));
+//	//Load the use mode's page directory address.
+//	lcr3 (PADDR(e->env_pgdir));
 
 	// load each program segment (ignores ph flags)
 	struct Proghdr * ph = (struct Proghdr *) ((uint8_t *) elf + elf->e_phoff);
@@ -390,14 +390,14 @@ load_icode(struct Env *e, uint8_t *binary)
 	for (; ph < eph; ph++) {
 		if (ph->p_type == ELF_PROG_LOAD) {
 			region_alloc(e, (void*)(ph->p_va), ph->p_memsz);
-//			copyToSeg(e->env_pgdir, ph->p_va, binary+ph->p_offset, ph->p_filesz);
-//			copyToSeg(e->env_pgdir, ph->p_va + ph->p_filesz, NULL, ph->p_memsz-ph->p_filesz);
-			memset ((void *)ph->p_va, 0, ph->p_memsz);
-			memmove ((void *)ph->p_va, binary + ph->p_offset, ph->p_filesz);
+			copyToSeg(e->env_pgdir, ph->p_va, binary+ph->p_offset, ph->p_filesz);
+			copyToSeg(e->env_pgdir, ph->p_va + ph->p_filesz, NULL, ph->p_memsz-ph->p_filesz);
+//			memset ((void *)ph->p_va, 0, ph->p_memsz);
+//			memmove ((void *)ph->p_va, binary + ph->p_offset, ph->p_filesz);
 		}
 	}
-	//Reset the kernel pte since we've already finished the operation in user space.
-	lcr3 (PADDR(kern_pgdir));
+//	//Reset the kernel pte since we've already finished the operation in user space.
+//	lcr3 (PADDR(kern_pgdir));
 
 	// Now map one page for the program's initial stack
 	// at virtual address USTACKTOP - PGSIZE.
